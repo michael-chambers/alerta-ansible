@@ -1,0 +1,128 @@
+- name: Deploy Alerta
+  hosts: all
+  become: true
+  vars_files:
+    - alerta_vars.yml
+
+  tasks:
+    - name: Retrieve MongDB repo key
+      ansible.builtin.apt_key: #apt-key will be deprecated in Ubuntu 22.04
+        state: present
+        url: https://www.mongodb.org/static/pgp/server-6.0.asc
+
+    - name: Place sources.list for MongoDB
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/files/mongodb-org-6.0.list"
+        dest: /etc/apt/sources.list.d
+
+    - name: Update all packages
+      ansible.builtin.apt:
+        name: "*"
+        update_cache: yes
+        state: latest
+
+    - name: Install software packages
+      ansible.builtin.package:
+        name: "{{ item }}"
+        state: present
+      with_items:
+        - "{{ packages }}"
+
+    - name: Start MongoDB
+      ansible.builtin.systemd:
+        name: mongod
+        enabled: yes
+        state: started
+
+    - name: Install Alerta
+      ansible.builtin.pip:
+        name: "{{ item }}"
+        extra_args: "--upgrade"
+        virtualenv: /opt/alerta
+        virtualenv_command: "python3 -m venv"
+        state: present
+      with_items:
+        - "{{ modules }}"
+
+    - name: Retrieve Alerta UI package
+      ansible.builtin.unarchive:
+        src: https://github.com/alerta/alerta-webui/releases/latest/download/alerta-webui.tar.gz
+        remote_src: yes
+        dest: /tmp
+
+    - name: Copy Alerta UI files
+      ansible.builtin.copy:
+        src: /tmp/dist/
+        dest: /var/www/html
+        remote_src: yes
+
+    - name: Copy wsgi.py
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/files/wsgi.py"
+        dest: /var/www
+
+    - name: Copy uwsgi.ini
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/files/uwsgi.ini"
+        dest: /etc
+
+    - name: Copy uwsgi.service
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/files/uwsgi.service"
+        dest: /etc/systemd/system
+
+    - name: Start uWSGI service
+      ansible.builtin.systemd:
+        daemon_reload: yes
+        name: uwsgi
+        enabled: yes
+        state: started
+
+    - name: Copy NGINX config file
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/files/alerta"
+        dest: /etc/nginx/sites-available
+
+    - name: Copy TLS private key
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/files/private/global-alerta.key"
+        dest: /etc/ssl/private
+
+    - name: Copy TLS certificate
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/files/private/global-alerta.crt"
+        dest: /etc/ssl/certs
+
+    - name: Apply NGINX configuration
+      ansible.builtin.file:
+        src: /etc/nginx/sites-available/alerta
+        path: /etc/nginx/sites-enabled/default
+        state: link
+
+    - name: Restart NGINX
+      ansible.builtin.systemd:
+        name: nginx
+        state: restarted
+      
+    - name: Set endpoint
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/files/config.json"
+        dest: /var/www/html
+        mode: 0666
+
+    - name: Copy alertad.conf
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/files/alertad.conf"
+        dest: /etc
+
+    - name: Create alertad.log
+      ansible.builtin.file:
+        path: /var/log/alertad.log
+        state: touch
+        owner: "www-data"
+        group: "www-data"
+
+    - name: Restart uWSGI service
+      ansible.builtin.systemd:
+        name: uwsgi
+        state: restarted
